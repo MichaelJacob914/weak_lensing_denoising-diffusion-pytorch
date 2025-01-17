@@ -840,6 +840,208 @@ class GaussianDiffusion(Module):
         img = self.normalize(img)
         return self.p_losses(img, t, *args, **kwargs)
 
+    def unnorm_kappa(self, kappa, kappa_min = -0.08201675, kappa_max = 0.7101586):
+        kappa_unnorm = (kappa * (kappa_max - kappa_min)) + kappa_min
+        return kappa_unnorm
+
+    def torch_kappa_to_shear_old(self, kappa, N_grid = 256, theta_max = 12., J = 1j, EPS = 1e-20): 
+        torch_map_tool  = TorchMapTools(N_grid, theta_max)
+        kappa_fourier = torch_map_tool.map2fourier(kappa)
+        y_1, y_2   = torch_map_tool.do_fwd_KS(kappa_fourier)
+        shear_map = torch.stack((y_1, y_2))
+        return shear_map
+    
+    def torch_kappa_to_shear(self, kappa, N_grid = 256, theta_max = 12., J = 1j, EPS = 1e-20): 
+        torch_map_tool  = TorchMapTools(N_grid, theta_max)
+        y_1, y_2   = torch_map_tool.do_fwd_KS1(kappa)
+        shear_map = torch.stack((y_1, y_2))
+        return shear_map
+
+    def compute_grad_log_lkl(self, x_t, x_start, noisy_image, sigma_noise): 
+        kappa_map = self.unnormalize(x_start)
+        kappa_map = self.unnorm_kappa(kappa_map)
+        shears = torch.zeros_like(noisy_image)
+        len, *_ = x_start.shape
+        for i in range(len):
+            shears[i] = (self.torch_kappa_to_shear_old(kappa_map[i].squeeze(0))).unsqueeze(0)
+        loglkl = self.compute_complex_log_likelihood(shears, noisy_image, sigma_noise)
+        loglkl.backward(retain_graph = True)
+        grad_log_lkl = x_t.grad
+        diff = shears - noisy_image
+        norm = torch.norm(diff, p='fro')
+        return grad_log_lkl, norm  
+
+    def compute_complex_log_likelihood(self, noisy_pred, noisy_shear_map, sigma_noise):
+        # Extract real and imaginary parts
+        y_1 = noisy_pred[0][0]
+        y_2 = noisy_pred[0][1]
+
+        y_1_sim = noisy_shear_map[0][0]
+        y_2_sim = noisy_shear_map[0][1]
+
+        # Compute MSE for real and imaginary parts separately
+        real_mse = -0.5 * (y_1 - y_1_sim)**2 / (sigma_noise**2)
+        imag_mse = -0.5 * (y_2 - y_2_sim)**2 / (sigma_noise**2)
+
+        # Sum the MSEs for real and imaginary parts to get a real-valued loss
+        mse = real_mse + imag_mse
+        return (-mse.sum())
+
+    def ddim_sample_posterior(self, shape, noisy_image, sigma_noise, return_all_timesteps = False, zeta = .5, mean = 0):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        x_t = torch.randn(shape, device = device)
+        imgs = [x_t]
+        x_start = torch.zeros(shape, device = device)
+        means = []
+        mean = (mean * 2) - 1
+        print('mean', mean)
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+            x_t.requires_grad = True
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+            self_cond = x_start if self.self_condition else None
+            pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            
+            print('x_start mean', torch.mean(x_start.squeeze(0).squeeze(0).detach().cpu()))
+            #x_start = x_start + mean - torch.mean(x_start.detach().cpu())
+            print('x_start mean after', torch.mean(x_start.squeeze(0).squeeze(0).detach().cpu()))
+            #means.append(torch.mean(self.unnormalize(x_start.squeeze(0).squeeze(0)).detach().cpu()).numpy())
+            
+            if time_next < 0:
+                img = x_start
+                imgs.append(img)
+                continue
+
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            alpha_t = alpha/alpha_next
+            noise = torch.randn_like(x_t)
+            print('Timestep', time)
+            grad_log_lkl, norm = self.compute_grad_log_lkl(x_t, x_start, noisy_image, sigma_noise)
+            print('Grad log likelihood: ', grad_log_lkl)
+            print('Norm: ', norm)
+            if(time > 0):
+                with torch.no_grad():
+                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
+                    zeta_new = zeta/norm
+                    x_t -= (1 - alpha_t) * (grad_log_lkl).detach()
+                    #x_t -= zeta_new * (grad_log_lkl).detach()
+
+            else: 
+                with torch.no_grad():
+                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise + sigma * noise)
+
+        ret = x_t if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        ret = self.unnormalize(ret)
+        return ret
+
+    def sample_posterior(self, batch_size = 16, return_all_timesteps = False, zeta = .5, mean = 0):
+        print("Sample Posterior called")
+        (h, w), channels = self.image_size, self.channels
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_posterior
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps, zeta = zeta, mean = mean)
+
+
+    def ddim_sample_sitcom(self, shape, noisy_image, sigma_noise, return_all_timesteps = False, K = 20, mean = 0, lr = 0.0001, lamb = 0):
+        batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+        sampling_timesteps = 999
+        eta = 0
+        times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        x_t = torch.randn(shape, device = device)
+        imgs = [x_t]
+        x_start = torch.zeros(shape, device = device)
+        means = []
+        mean = (mean * 2) - 1
+        threshold = 65536 * math.sqrt((.1 * .15) ** 2)
+        for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):
+            x_t.requires_grad = True
+            time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
+            self_cond = x_start if self.self_condition else None
+
+            v_t = x_t.clone().detach().requires_grad_(True)  # Ensure v_t is detached and requires gradients
+            optimizer = torch.optim.Adam([v_t], lr=lr)
+
+            for k in range(K): 
+                print("k", k)
+                if not v_t.requires_grad:
+                    v_t.requires_grad_(True)
+                
+                # Get predictions from the model
+                pred_noise, v_start, *_ = self.model_predictions(
+                    v_t, time_cond, self_cond, clip_x_start=True, rederive_pred_noise=True
+                )
+                
+                # Compute ||A(v_start) - y||^{2}_{2}
+                kappa_map = self.unnormalize(v_start)
+                kappa_map = self.unnorm_kappa(kappa_map)
+                
+                shears = torch.zeros_like(noisy_image)
+                length, *_ = x_start.shape
+                for i in range(length):
+                  shears[i] = self.torch_kappa_to_shear_old(kappa_map[i].squeeze(0)).unsqueeze(0)
+
+                # Define the two terms of the loss
+                term1 = torch.norm(shears - noisy_image) ** 2
+                print("Term 1", term1)
+                term2 = lamb * torch.norm(v_t - x_t) ** 2
+                print("Term 2", term2)
+                
+                # Compute the total loss
+                sum_loss = term1 + term2
+
+                # Backpropagate the loss
+                optimizer.zero_grad()
+                sum_loss.backward()
+                optimizer.step()
+
+                # Check the termination condition
+                if term1 < threshold: 
+                    break
+
+            x_t = v_t  # Assign final v_t to x_t after loop completion
+
+            pred_noise, x_start, *_ = self.model_predictions(x_t, time_cond, self_cond, clip_x_start = True, rederive_pred_noise = True)
+            
+            x_start = x_start #+ mean - torch.mean(x_start.detach().cpu())
+
+            if time_next < 0:
+                img = x_start
+                imgs.append(img)
+                continue
+
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            alpha_t = alpha/alpha_next
+            noise = torch.randn_like(x_t)
+            if(time > 0):
+                with torch.no_grad():
+                    x_t = (x_start * alpha_next.sqrt() + c * pred_noise)
+
+        ret = x_t if not return_all_timesteps else torch.stack(imgs, dim = 1)
+        ret = self.unnormalize(ret)
+        return ret
+
+    def sample_sitcom(self, batch_size = 1, return_all_timesteps = False, K = 20, mean = 0): 
+        print("Sample sitcom called")
+        (h, w), channels = self.image_size, self.channels
+        sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample_sitcom
+        return sample_fn((batch_size, channels, h, w), self.noisy_image, self.sigma_noise, return_all_timesteps = return_all_timesteps, K = K, mean = mean)
+
+
 # dataset classes
 
 class Dataset(Dataset):
