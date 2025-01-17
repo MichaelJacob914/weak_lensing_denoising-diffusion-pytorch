@@ -1076,6 +1076,47 @@ class Dataset(Dataset):
         img = Image.open(path)
         return self.transform(img)
 
+class OldDataset(Dataset):
+     def __init__( self, folder, image_size, exts = ['csv', 'jpeg', 'png', 'tiff'], augment_horizontal_flip = False, convert_image_to = None):
+        super().__init__()
+        self.folder = folder
+        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+
+     def __len__(self):
+        return len(self.paths)
+
+     def __getitem__(self, index):
+        # Get the path of the CSV file
+        path = self.paths[index]
+            
+        # Load CSV data and convert it to a tensor
+        data = np.loadtxt(path, delimiter=',')
+        tensor_data = torch.from_numpy(data).float().unsqueeze(0)
+
+        return tensor_data
+     
+class MassiveNusDataset(Dataset):
+  def __init__(self, folder, image_size, exts = ['csv', 'jpeg', 'png', 'tiff'], augment_horizontal_flip = False, convert_image_to = None, N_train=8000,):
+    super().__init__()
+    self.N_train = N_train
+    self.folder = folder
+    train_data = np.array([self._get_map(i) for i in range(self.N_train)])
+    self.N_tomo_bins = train_data.shape[1]
+    self.kappa_min = np.array([train_data[:,i].min() for i in range(self.N_tomo_bins)])[np.newaxis,:,np.newaxis,np.newaxis]
+    self.kappa_max = np.array([train_data[:,i].max() for i in range(self.N_tomo_bins)])[np.newaxis,:,np.newaxis,np.newaxis]
+    self.train_data = (train_data - self.kappa_min) / (self.kappa_max - self.kappa_min)
+
+  def __len__(self):
+    return self.N_train
+
+  def __getitem__(self, index):
+    return self.train_data[index]
+
+  def _get_map(self, i):
+    return np.load(self.folder + '/%d.npy'%(i+1))
+
+# trainer class
+
 # trainer class
 
 class Trainer:
