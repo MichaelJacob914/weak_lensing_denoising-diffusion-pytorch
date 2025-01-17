@@ -1094,9 +1094,9 @@ class OldDataset(Dataset):
         tensor_data = torch.from_numpy(data).float().unsqueeze(0)
 
         return tensor_data
-     
+    
 class MassiveNusDataset(Dataset):
-  def __init__(self, folder, image_size, exts = ['csv', 'jpeg', 'png', 'tiff'], augment_horizontal_flip = False, convert_image_to = None, N_train=8000,):
+  def __init__(self, folder, image_size, exts = ['csv', 'jpeg', 'png', 'tiff', 'npy'], augment_horizontal_flip = False, convert_image_to = None, N_train=8000,):
     super().__init__()
     self.N_train = N_train
     self.folder = folder
@@ -1183,7 +1183,7 @@ class Trainer:
 
         # dataset and dataloader
 
-        self.ds = OldDataset(folder = folder, image_size = self.image_size, augment_horizontal_flip = augment_horizontal_flip, convert_image_to = convert_image_to)
+        self.ds = MassiveNusDataset(folder = folder, image_size = self.image_size, augment_horizontal_flip= False, convert_image_to= None)
 
         assert len(self.ds) >= 100, 'you should have at least 100 images in your folder. at least 10k images recommended'
 
