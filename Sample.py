@@ -74,9 +74,13 @@ print('Noise', sigma_noise)
 #data_single_norm is the data normed to have min 0 and max 1, data is the data normed with a global kappa min and max
 x_path = "/home2/mgjacob/Diffusion/data/data_images_grey/WLconv_z2.00_0002r.png" 
 
-x_map = Image.open(x_path)
+
+working_directory = os.getcwd()
+x_path = working_directory + "/kappa_128_4_bins/1.npy"
+
+x_map = np.load(x_path)
 transform = transforms.Compose([transforms.ToTensor()])
-x_map = transform(x_map.convert('L')).squeeze(0)
+x_map = transform(torch.tensor(x_map).float()).squeeze(0)
 kappa_map = unnorm_kappa(x_map)
 
 kappa_map = kappa_map.to('cuda:0')
