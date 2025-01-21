@@ -5,6 +5,12 @@
 
 
 import os
+import sys
+
+working_directory = os.getcwd()
+#MODIFY LINE BELOW IF NECESSARY
+sys.path.append(working_directory + 'weak_lensing_denoising-diffusion-pytorch/')
+
 import torch
 from PIL import Image
 import numpy as np
@@ -29,7 +35,9 @@ import requests
 import tarfile
 import os
 
+
 output_directory = "raw"
+
 url = "http://astronomy.nmsu.edu/aklypin/SUsimulations/MassiveNuS/convergence_maps/convergence_gal_mnv0.00000_om0.30000_As2.1000.tar"
 
 os.makedirs(output_directory, exist_ok=True)
@@ -49,7 +57,6 @@ try:
             if chunk: 
                 file.write(chunk)
                 downloaded_size += len(chunk)
-                # Print progress
                 progress = (downloaded_size / total_size) * 100
                 print(f"\rProgress: {progress:.2f}%", end="")
     print(f"\nDownloaded {filename} to {file_path}.")
@@ -58,15 +65,11 @@ try:
     with tarfile.open(file_path, "r:") as tar:
         tar.extractall(path=output_directory)
     print(f"Extracted files to {output_directory}.")
-    
-    os.remove(file_path)
-    print(f"Removed the downloaded file {file_path}.")
 
 except requests.exceptions.RequestException as e:
     print(f"Error downloading the file: {e}")
 except tarfile.TarError as e:
     print(f"Error extracting the file: {e}")
-
 
 # In[ ]:
 
@@ -101,14 +104,12 @@ def get_kappa(i):
 
 kappa = get_kappa(526)
 
-os.makedirs(output_directory, exist_ok=True)
+os.makedirs('kappa_128_4bins/', exist_ok=True)
 for i in trange(1,10000):
   kappa = get_kappa(i)
   np.save('kappa_128_4bins/%d.npy'%(i), kappa)
 
-
 # In[ ]:
-
 
 import torch
 from denoising_diffusion_pytorch import Unet, GaussianDiffusion, Trainer
@@ -124,18 +125,20 @@ model = Unet(
 
 diffusion = GaussianDiffusion(
     model,
-    image_size = 256,
+    image_size = 128,
     timesteps = 1000,    # number of steps
     sampling_timesteps = 999,
     ddim_sampling_eta = 1 
 )
 
+working_directory = os.getcwd()
+path = working_directory + '/kappa_128_4bins'
 trainer = Trainer(
     diffusion,
-    '/raw/kappa_128_4bins',
+    path, 
     train_batch_size = 16,
     train_lr = 8e-5,
-    save_and_sample_every = 10000,
+    save_and_sample_every = 1000,
     train_num_steps = 80000,         # total training steps
     gradient_accumulate_every = 2,    # gradient accumulation steps
     ema_decay = 0.995,                # exponential moving average decay
@@ -144,9 +147,6 @@ trainer = Trainer(
 )
 
 trainer.train()
-
-
-# In[ ]:
 
 
 
